@@ -35,6 +35,7 @@ KEY_POSITION_IDS = ".".join(
 )
 
 
+
 @dataclass
 class Merger:
     cfg: DictConfig
@@ -99,13 +100,22 @@ class Merger:
         if theta_2 and key not in theta_2:
             return
         if KEY_POSITION_IDS in key:
-            return 
-
+            print(key)
+            if self.cfg.skip_position_ids == 1:
+                if not best or self.cfg.best_precision == "16":
+                    return (key, theta_0[key].half())
+                return (key, theta_0[key])
+            elif self.cfg.skip_position_ids == 2: 
+                theta_0[key] = torch.tensor([list(range(MAX_TOKENS))], dtype=torch.int64 ) 
+                if not best or self.cfg.best_precision == "16":
+                    theta_0[key] = theta_0[key].half()
+                return (key, theta_0[key])
         re_inp = re.compile(r"\.input_blocks\.(\d+)\.")  # 12
         re_mid = re.compile(r"\.middle_block\.(\d+)\.")  # 1
         re_out = re.compile(r"\.output_blocks\.(\d+)\.")  # 12
         c_alpha = base_alpha
         c_beta = base_beta
+
         if "model.diffusion_model." in key:
             weight_index = -1
 
@@ -191,15 +201,24 @@ class Merger:
                 merged_model[key] = result[1]
 
         for key in tqdm(theta_1.keys(), desc="merging 2/2"):
-            if "model" in key and key not in theta_0:
+            if "model" in key and key not in merged_model:
+                if KEY_POSITION_IDS in key:
+                    print(key)
+                    if self.cfg.skip_position_ids == 1:
+                        continue
+                    elif self.cfg.skip_position_ids == 2:
+                        merged_model[key] = torch.tensor([list(range(MAX_TOKENS))], dtype=torch.int64 )
+                        if not best or self.cfg.best_precision == "16":
+                            merged_model[key] = merged_model[key].half()
+                        continue
+                
+                merged_model.update({key:theta_1[key]})
+                if not best or self.cfg.best_precision == "16":
+                    merged_model[key] = merged_model[key].half()
+
+            elif theta_2 and key not in theta_2:
                 continue
-            if theta_2 and key not in theta_2:
-                continue
-            if KEY_POSITION_IDS in key:
-                continue
-            merged_model[key] = theta_1[key]
-            if not best or self.cfg.best_precision == "16":
-                merged_model[key] = merged_model[key].half()
+
 
         if best:
             print(f"Saving {self.best_output_file}")
