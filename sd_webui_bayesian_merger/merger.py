@@ -39,6 +39,7 @@ NUM_MODELS_NEEDED = {
     "sum_twice": 3,
     "triple_sum": 3,
     "weighted_double_difference": 5,
+    "triple_sum_difference": 4,
 }
 
 NAI_KEYS = {
@@ -117,6 +118,7 @@ class Merger:
             "weighted_double_difference",
             "sum_twice",
             "triple_sum",
+            "triple_sum_difference",
         ]:
             self.greek_letters.append("beta")
         self.model_name_suffix = f"bbwm-{'-'.join(self.model_real_names)}"
@@ -166,7 +168,7 @@ class Merger:
         bases: Dict,
         best: bool,
     ) -> Tuple[str, Dict]:
-        if KEY_POSITION_IDS in key:
+        if KEY_POSITION_IDS in key or "model" not in key:
             if self.cfg.skip_position_ids == 1:
                 if not best or self.cfg.best_precision == "16":
                     return (key, thetas["model_a"][key].half())
@@ -234,9 +236,11 @@ class Merger:
             return (1 - beta) * ((1 - alpha) * t0 + alpha * t1) + beta * t2
         elif self.cfg.merge_mode == "triple_sum":
             return (1 - alpha - beta) * t0 + alpha * t1 + beta * t2
+        t3 = thetas["model_d"][key]
+        elif self.cfg.merge_mode == "triple_sum_difference":
+            return (1 - alpha - beta) * t0 + (alpha * t1) + (beta * (t2-t3))
+        t4 = thetas["model_e"][key]
         elif self.cfg.merge_mode == "weighted_double_difference":
-            t3 = thetas["model_d"][key]
-            t4 = thetas["model_e"][key]
             return (1 - alpha) * t0 + alpha * (
                 (1 - beta) * (t1 - t2) + beta * (t3 - t4)
             )

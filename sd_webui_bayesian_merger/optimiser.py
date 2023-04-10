@@ -33,7 +33,7 @@ class Optimiser:
         self.prompter = Prompter(self.cfg)
         self.iteration = 0
         self._clean = True
-        self.has_beta = self.cfg.merge_mode in ["sum_twice", "triple_sum"]
+        self.has_beta = self.cfg.merge_mode in ["sum_twice", "triple_sum", "triple_sum_difference"]
 
     def cleanup(self) -> None:
         if self._clean:
