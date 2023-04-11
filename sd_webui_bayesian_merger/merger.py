@@ -237,10 +237,12 @@ class Merger:
         elif self.cfg.merge_mode == "triple_sum":
             return (1 - alpha - beta) * t0 + alpha * t1 + beta * t2
         t3 = thetas["model_d"][key]
-        elif self.cfg.merge_mode == "triple_sum_difference":
-            return (1 - alpha - beta) * t0 + (alpha * t1) + (beta * (t2-t3))
+        if self.cfg.merge_mode == "triple_sum_difference":
+            t2=t2-t3
+            t0=(1 - alpha) * t0 + alpha * t1
+            return (1-beta)*t0 + beta * t2
         t4 = thetas["model_e"][key]
-        elif self.cfg.merge_mode == "weighted_double_difference":
+        if self.cfg.merge_mode == "weighted_double_difference":
             return (1 - alpha) * t0 + alpha * (
                 (1 - beta) * (t1 - t2) + beta * (t3 - t4)
             )
