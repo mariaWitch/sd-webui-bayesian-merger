@@ -8,6 +8,9 @@ from pathlib import Path
 
 import torch
 import safetensors.torch
+import numpy as np
+import scipy.ndimage
+from scipy.ndimage.filters import median_filter as filter
 
 from tqdm import tqdm
 from omegaconf import DictConfig
@@ -121,6 +124,7 @@ class Merger:
             self.greek_letters.append("beta")
         self.model_name_suffix = f"bbwm-{'-'.join(self.model_real_names)}"
 
+
         try:
             assert len(self.model_keys) == NUM_MODELS_NEEDED[self.cfg.merge_mode]
         except AssertionError:
@@ -165,6 +169,8 @@ class Merger:
         weights: Dict,
         bases: Dict,
         best: bool,
+        sim=None,
+        sims=None,
     ) -> Tuple[str, Dict]:
         if KEY_POSITION_IDS in key:
             if self.cfg.skip_position_ids == 1:
@@ -184,6 +190,8 @@ class Merger:
         for theta in thetas.values():
             if key not in theta:
                 return
+        
+
         current_bases = bases
         if "model.diffusion_model." in key:
             weight_index = -1
@@ -208,25 +216,51 @@ class Merger:
 
             if weight_index >= 0:
                 current_bases = {k: w[weight_index] for k, w in weights.items()}
-
-        merged = self.merge_block(current_bases, thetas, key)
+        if self.cfg.cosine_mode:
+            merged = self.merge_block(current_bases, thetas, key, sim=sim,sims=sims)
+        else:
+            merged = self.merge_block(current_bases, thetas, key)
+        
 
         if not best or self.cfg.best_precision == "16":
             merged = merged.half()
 
         return (key, merged)
 
-    def merge_block(self, current_bases: Dict, thetas: Dict, key: str) -> Dict:
+    def merge_block(self, current_bases: Dict, thetas: Dict, key: str, sim=None,sims=None) -> Dict:
         t0 = thetas["model_a"][key]
         t1 = thetas["model_b"][key]
         alpha = current_bases["alpha"]
-        if self.cfg.merge_mode == "weighted_sum":
-            return (1 - alpha) * t0 + alpha * t1
+        if self.cfg.cosine_mode:
+            if self.cfg.merge_mode == "weighted_sum":
+                # skip VAE model parameters to get better results
+                if "first_stage_model" in key: return t0
+                if "model" in key and key in thetas["model_b"]:
+                    simab = sim(t0.to(torch.float32), t1.to(torch.float32))
+                    dot_product = torch.dot(t0.view(-1).to(torch.float32), t1.view(-1).to(torch.float32))
+                    magnitude_similarity = dot_product / (torch.norm(t0.to(torch.float32)) * torch.norm(t1.to(torch.float32)))
+                    combined_similarity = (simab + magnitude_similarity) / 2.0
+                    k = (combined_similarity - sims.min()) / (sims.max() - sims.min())
+                    k = k - alpha
+                    k = k.clip(min=.0,max=1.)
+                    return (1 - k) * t0 + k * t1
+            elif self.cfg.merge_mode == "add_difference":
+                # Apply median filter to the weight differences
+                filtered_diff = scipy.ndimage.median_filter(t1.to(torch.float32).cpu().numpy(), size=3)
 
+                # Apply Gaussian filter to the filtered differences
+                filtered_diff = scipy.ndimage.gaussian_filter(filtered_diff, sigma=1)
+                
+                t1 = torch.tensor(filtered_diff)
+                return t0 + alpha * t1
+        else:
+            if self.cfg.merge_mode == "weighted_sum":
+                return (1 - alpha) * t0 + alpha * t1
+            t2 = thetas["model_c"][key]
+            if self.cfg.merge_mode == "add_difference":
+                return t0 + alpha * (t1 - t2)
         t2 = thetas["model_c"][key]
-        if self.cfg.merge_mode == "add_difference":
-            return t0 + alpha * (t1 - t2)
-        elif self.cfg.merge_mode == "weighted_add_difference":
+        if self.cfg.merge_mode == "weighted_add_difference":
             return (1 - alpha) * t0 + alpha * (t1 - t2)
 
         beta = current_bases["beta"]
@@ -249,16 +283,54 @@ class Merger:
     ) -> None:
         thetas = {k: self.load_sd_model(m) for k, m in self.models.items()}
 
+        if self.cfg.cosine_mode:
+            if self.cfg.merge_mode == "add_difference":
+                for keys in tqdm(thetas["model_b"].keys()):
+                    if 'model' in keys:
+                        if keys in thetas["model_c"]:
+                            t2=thetas["model_c"].get(keys, torch.zeros_like(thetas["model_b"][keys]))
+                            thetas["model_b"][keys]= thetas["model_b"][keys] - t2
+                        else:
+                            thetas["model_b"][keys]=torch.zeros_like(thetas["model_b"][keys])
+                del thetas["model_c"]
+            sim = torch.nn.CosineSimilarity(dim=0)
+            sims = np.array([], dtype=np.float64)
+            for key in (tqdm(thetas["model_a"].keys(), desc="Stage 0")):
+                 # skip VAE model parameters to get better results
+                if "first_stage_model" in key: continue
+                if "model" in key and key in thetas["model_b"]:
+                    simab = sim(thetas["model_a"][key].to(torch.float32), thetas["model_b"][key].to(torch.float32))
+                    dot_product = torch.dot(thetas["model_a"][key].view(-1).to(torch.float32), thetas["model_b"][key].view(-1).to(torch.float32))
+                    magnitude_similarity = dot_product / (torch.norm(thetas["model_a"][key].to(torch.float32)) * torch.norm(thetas["model_b"][key].to(torch.float32)))
+                    combined_similarity = (simab + magnitude_similarity) / 2.0
+                    sims = np.append(sims, combined_similarity.numpy())
+            sims = sims[~np.isnan(sims)]
+            sims = np.delete(sims, np.where(sims < np.percentile(sims, 1, method='midpoint')))
+            sims = np.delete(sims, np.where(sims > np.percentile(sims, 99, method='midpoint')))
+        
+
         merged_model = {}
         for key in tqdm(thetas["model_a"].keys(), desc="stage 1"):
-            if result := self.merge_key(
-                key,
-                thetas,
-                weights,
-                bases,
-                best,
-            ):
-                merged_model[key] = result[1]
+            if self.cfg.cosine_mode:
+                 if result := self.merge_key(
+                    key,
+                    thetas,
+                    weights,
+                    bases,
+                    best,
+                    sim=sim,
+                    sims=sims,
+                ):
+                    merged_model[key] = result[1]
+            else:
+                if result := self.merge_key(
+                    key,
+                    thetas,
+                    weights,
+                    bases,
+                    best,
+                ):
+                    merged_model[key] = result[1]
 
         for key in tqdm(thetas["model_b"].keys(), desc="stage 2"):
             if "model" in key and key not in merged_model:
