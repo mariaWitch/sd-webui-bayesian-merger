@@ -285,7 +285,7 @@ class Merger:
 
         if self.cfg.cosine_mode:
             if self.cfg.merge_mode == "add_difference":
-                for keys in tqdm(thetas["model_b"].keys()):
+                for keys in tqdm(thetas["model_b"].keys(), desc="Stage 0 (Subtractive Merge)"):
                     if 'model' in keys:
                         if keys in thetas["model_c"]:
                             t2=thetas["model_c"].get(keys, torch.zeros_like(thetas["model_b"][keys]))
@@ -295,7 +295,7 @@ class Merger:
                 del thetas["model_c"]
             sim = torch.nn.CosineSimilarity(dim=0)
             sims = np.array([], dtype=np.float64)
-            for key in (tqdm(thetas["model_a"].keys(), desc="Stage 0")):
+            for key in (tqdm(thetas["model_a"].keys(), desc="Stage 1")):
                  # skip VAE model parameters to get better results
                 if "first_stage_model" in key: continue
                 if "model" in key and key in thetas["model_b"]:
@@ -310,7 +310,7 @@ class Merger:
         
 
         merged_model = {}
-        for key in tqdm(thetas["model_a"].keys(), desc="stage 1"):
+        for key in tqdm(thetas["model_a"].keys(), desc="Stage 2"):
             if self.cfg.cosine_mode:
                  if result := self.merge_key(
                     key,
@@ -332,7 +332,7 @@ class Merger:
                 ):
                     merged_model[key] = result[1]
 
-        for key in tqdm(thetas["model_b"].keys(), desc="stage 2"):
+        for key in tqdm(thetas["model_b"].keys(), desc="Stage 3"):
             if "model" in key and key not in merged_model:
                 if KEY_POSITION_IDS in key:
                     if self.cfg.skip_position_ids == 1:
