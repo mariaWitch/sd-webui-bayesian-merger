@@ -301,21 +301,22 @@ class Merger:
                         else:
                             thetas["model_b"][keys]=torch.zeros_like(thetas["model_b"][keys])
                 del thetas["model_c"]
+            
             sim = torch.nn.CosineSimilarity(dim=0)
             sims = np.array([], dtype=np.float64)
-            for key in (tqdm(thetas["model_a"].keys(), desc="Stage 0.5 (Similarity Calculation)")):
-                 # skip VAE model parameters to get better results
-                if "first_stage_model" in key: continue
-                if "model" in key and key in thetas["model_b"]:
-                    simab = sim(thetas["model_a"][key].to(torch.float32), thetas["model_b"][key].to(torch.float32))
-                    dot_product = torch.dot(thetas["model_a"][key].view(-1).to(torch.float32), thetas["model_b"][key].view(-1).to(torch.float32))
-                    magnitude_similarity = dot_product / (torch.norm(thetas["model_a"][key].to(torch.float32)) * torch.norm(thetas["model_b"][key].to(torch.float32)))
-                    combined_similarity = (simab + magnitude_similarity) / 2.0
-                    sims = np.append(sims, combined_similarity.numpy())
-            sims = sims[~np.isnan(sims)]
-            sims = np.delete(sims, np.where(sims < np.percentile(sims, 1, method='midpoint')))
-            sims = np.delete(sims, np.where(sims > np.percentile(sims, 99, method='midpoint')))
-            sims = cp.array(sims, dtype=cp.float64)
+            if self.cfg.merge_mode == "weighted_sum":
+                for key in (tqdm(thetas["model_a"].keys(), desc="Stage 0 (Similarity Calculation)")):
+                    # skip VAE model parameters to get better results
+                    if "first_stage_model" in key: continue
+                    if "model" in key and key in thetas["model_b"]:
+                        simab = sim(thetas["model_a"][key].to(torch.float32), thetas["model_b"][key].to(torch.float32))
+                        dot_product = torch.dot(thetas["model_a"][key].view(-1).to(torch.float32), thetas["model_b"][key].view(-1).to(torch.float32))
+                        magnitude_similarity = dot_product / (torch.norm(thetas["model_a"][key].to(torch.float32)) * torch.norm(thetas["model_b"][key].to(torch.float32)))
+                        combined_similarity = (simab + magnitude_similarity) / 2.0
+                        sims = np.append(sims, combined_similarity.numpy())
+                sims = sims[~np.isnan(sims)]
+                sims = np.delete(sims, np.where(sims < np.percentile(sims, 1, method='midpoint')))
+                sims = np.delete(sims, np.where(sims > np.percentile(sims, 99, method='midpoint')))
         
 
         merged_model = {}
