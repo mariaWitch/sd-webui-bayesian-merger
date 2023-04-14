@@ -261,6 +261,19 @@ class Merger:
 
                 t1 = from_dlpack(filtered_diff.toDlpack()).cpu() # Let's pretend this was on the cpu the whole time
                 return t0 + alpha * t1
+            elif self.cfg.merge_mode == "sum_twice":
+                beta= current_bases[beta]
+                # skip VAE model parameters to get better results
+                if "first_stage_model" in key: return t0
+                if "model" in key and key in thetas["model_b"]:
+                    simab = sim(t0.to(torch.float32), t1.to(torch.float32))
+                    dot_product = torch.dot(t0.view(-1).to(torch.float32), t1.view(-1).to(torch.float32))
+                    magnitude_similarity = dot_product / (torch.norm(t0.to(torch.float32)) * torch.norm(t1.to(torch.float32)))
+                    combined_similarity = (simab + magnitude_similarity) / 2.0
+                    k = (combined_similarity - sims.min()) / (sims.max() - sims.min())
+                    k = k - beta
+                    k = k.clip(min=.0,max=1.)
+                    return (1 - k) * t0 + k * t1
         else:
             if self.cfg.merge_mode == "weighted_sum":
                 return (1 - alpha) * t0 + alpha * t1
@@ -282,6 +295,18 @@ class Merger:
             return (1 - alpha) * t0 + alpha * (
                 (1 - beta) * (t1 - t2) + beta * (t3 - t4)
             )
+
+    def simCalc( self, thetas: Dict, key: str, sim, sims ):
+        # skip VAE model parameters to get better results
+        if "first_stage_model" in key: return sims
+        if "model" in key and key in thetas["model_b"]:
+            simab = sim(thetas["model_a"][key].to(torch.float32), thetas["model_b"][key].to(torch.float32))
+            dot_product = torch.dot(thetas["model_a"][key].view(-1).to(torch.float32), thetas["model_b"][key].view(-1).to(torch.float32))
+            magnitude_similarity = dot_product / (torch.norm(thetas["model_a"][key].to(torch.float32)) * torch.norm(thetas["model_b"][key].to(torch.float32)))
+            combined_similarity = (simab + magnitude_similarity) / 2.0
+            sims = np.append(sims, combined_similarity.numpy())
+        return sims
+
 
     def merge(
         self,
@@ -317,8 +342,40 @@ class Merger:
                 sims = sims[~np.isnan(sims)]
                 sims = np.delete(sims, np.where(sims < np.percentile(sims, 1, method='midpoint')))
                 sims = np.delete(sims, np.where(sims > np.percentile(sims, 99, method='midpoint')))
-        
-
+            elif self.cfg.merge_mode == "sum_twice":
+                sim = torch.nn.CosineSimilarity(dim=0)
+                sims = np.array([], dtype=np.float64)
+                for key in (tqdm(thetas["model_a"].keys(), desc="Stage 0 (Similarity Calculation)")):
+                   sims= self.simCalc(thetas,key,sim,sims)
+                sims = sims[~np.isnan(sims)]
+                sims = np.delete(sims, np.where(sims < np.percentile(sims, 1, method='midpoint')))
+                sims = np.delete(sims, np.where(sims > np.percentile(sims, 99, method='midpoint')))
+                self.cfg.merge_mode="weighted_sum"
+                for key in (tqdm(thetas["model_a"].keys(), desc="Stage 0.5 (First Sum Merge)")):
+                    if result := self.merge_key(
+                    key,
+                    thetas,
+                    weights,
+                    bases,
+                    best,
+                    sim=sim,
+                    sims=sims,
+                ):
+                        thetas["model_a"][key]= result[1]
+                for key in tqdm(thetas["model_b"].keys(), desc="Stage 0.75 (First Sum Second Pass)"):
+                    if "model" in key and key not in merged_model:
+                        merged_model.update({key: thetas["model_b"][key]})
+                del thetas["model_b"]
+                thetas["model_b"]=thetas.pop("model_c")
+                sim = torch.nn.CosineSimilarity(dim=0)
+                sims = np.array([], dtype=np.float64)
+                for key in (tqdm(thetas["model_a"].keys(), desc="Stage 1 (Similarity Calculation)")):
+                    sims=self.simCalc(thetas, key, sim,sims)
+                sims = sims[~np.isnan(sims)]
+                sims = np.delete(sims, np.where(sims < np.percentile(sims, 1, method='midpoint')))
+                sims = np.delete(sims, np.where(sims > np.percentile(sims, 99, method='midpoint')))
+                self.cfg.merge_mode="sum_twice"
+                
         merged_model = {}
         for key in tqdm(thetas["model_a"].keys(), desc="Stage 1 (Model Merge)"):
             if self.cfg.cosine_mode:
