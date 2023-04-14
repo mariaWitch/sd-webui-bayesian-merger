@@ -13,3 +13,4 @@ pytest
 transformers
 numpy
 hydra-core
+cupy-cuda11x

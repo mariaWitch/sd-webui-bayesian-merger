@@ -7,10 +7,13 @@ from typing import Dict, Tuple
 from pathlib import Path
 
 import torch
+from torch.utils.dlpack import to_dlpack
+from torch.utils.dlpack import from_dlpack
 import safetensors.torch
 import numpy as np
-import scipy.ndimage
-from scipy.ndimage.filters import median_filter as filter
+import cupy as cp
+import cupyx.scipy as scipy
+from cupyx.scipy.ndimage._filters import median_filter as filter
 
 from tqdm import tqdm
 from omegaconf import DictConfig
@@ -245,13 +248,18 @@ class Merger:
                     k = k.clip(min=.0,max=1.)
                     return (1 - k) * t0 + k * t1
             elif self.cfg.merge_mode == "add_difference":
+                # CuPy hacks to avoid copying tensors to gpu.
+                tx1 = t1.to(torch.float32).cuda()
+                dx = to_dlpack(tx1)
+                cx = cp.from_dlpack(dx)
                 # Apply median filter to the weight differences
-                filtered_diff = scipy.ndimage.median_filter(t1.to(torch.float32).cpu().numpy(), size=3)
+                filtered_diff = scipy.ndimage.median_filter(cx, size=3)
+                #filtered_diff = scipy.ndimage.median_filter(t1.to(torch.float32).cpu().numpy(), size=3)
 
                 # Apply Gaussian filter to the filtered differences
                 filtered_diff = scipy.ndimage.gaussian_filter(filtered_diff, sigma=1)
-                
-                t1 = torch.tensor(filtered_diff)
+
+                t1 = from_dlpack(filtered_diff.toDlpack()).cpu() # Let's pretend this was on the cpu the whole time
                 return t0 + alpha * t1
         else:
             if self.cfg.merge_mode == "weighted_sum":
@@ -295,7 +303,7 @@ class Merger:
                 del thetas["model_c"]
             sim = torch.nn.CosineSimilarity(dim=0)
             sims = np.array([], dtype=np.float64)
-            for key in (tqdm(thetas["model_a"].keys(), desc="Stage 1")):
+            for key in (tqdm(thetas["model_a"].keys(), desc="Stage 0.5 (Similarity Calculation)")):
                  # skip VAE model parameters to get better results
                 if "first_stage_model" in key: continue
                 if "model" in key and key in thetas["model_b"]:
@@ -307,10 +315,11 @@ class Merger:
             sims = sims[~np.isnan(sims)]
             sims = np.delete(sims, np.where(sims < np.percentile(sims, 1, method='midpoint')))
             sims = np.delete(sims, np.where(sims > np.percentile(sims, 99, method='midpoint')))
+            sims = cp.array(sims, dtype=cp.float64)
         
 
         merged_model = {}
-        for key in tqdm(thetas["model_a"].keys(), desc="Stage 2"):
+        for key in tqdm(thetas["model_a"].keys(), desc="Stage 1 (Model Merge)"):
             if self.cfg.cosine_mode:
                  if result := self.merge_key(
                     key,
@@ -332,7 +341,7 @@ class Merger:
                 ):
                     merged_model[key] = result[1]
 
-        for key in tqdm(thetas["model_b"].keys(), desc="Stage 3"):
+        for key in tqdm(thetas["model_b"].keys(), desc="Stage 2 (Model Merge)"):
             if "model" in key and key not in merged_model:
                 if KEY_POSITION_IDS in key:
                     if self.cfg.skip_position_ids == 1:
